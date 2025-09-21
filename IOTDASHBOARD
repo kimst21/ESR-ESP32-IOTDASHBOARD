@@ -6,7 +6,7 @@
 
 /* ========== 네트워크 설정 (Network Configuration) ========== */
 const char* ssid = "WeVO_2.4G";        // 연결할 WiFi 네트워크의 이름 (SSID - Service Set Identifier)
-const char* password = "Toolbox,WEVO8358+";     // WiFi 네트워크의 WPA/WPA2 보안 비밀번호
+const char* password = "WEVO8358";     // WiFi 네트워크의 WPA/WPA2 보안 비밀번호
 
 /* ========== 하드웨어 설정 (Hardware Configuration) ========== */
 Adafruit_BME280 bme;                    // BME280 센서 객체 생성 - I2C 통신으로 온도, 습도, 압력 측정
