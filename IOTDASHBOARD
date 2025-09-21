@@ -1,370 +1,857 @@
-/* ========== 라이브러리 포함 (Include Libraries) ========== */
-#include "WiFi.h"                // ESP32의 WiFi 연결 및 네트워크 통신 기능을 사용하기 위한 라이브러리
-#include "ESPAsyncWebServer.h"   // 비동기 웹서버 생성 라이브러리 (여러 클라이언트의 HTTP 요청을 동시에 처리 가능)
-#include <Adafruit_BME280.h>     // BME280 온습도 센서를 제어하기 위한 Adafruit 라이브러리
-#include <Adafruit_Sensor.h>     // Adafruit 센서들의 공통 기능과 인터페이스를 제공하는 기반 라이브러리
+# ========== 라이브러리 임포트 구간 ==========
+# 비동기 처리를 위한 asyncio - 웹서버와 센서 모니터링을 동시에 실행
+import asyncio
+# WiFi 네트워크 연결 및 관리를 위한 network 라이브러리
+import network
+# TCP/IP 소켓 통신을 위한 socket (웹서버 구현용)
+import socket
+# 시간 지연 및 타이밍 제어를 위한 time 라이브러리
+import time
+# JSON 데이터 직렬화/역직렬화를 위한 json (API 응답용)
+import json
+# GPIO 핀 제어, I2C 통신, 타이머를 위한 machine 라이브러리
+from machine import Pin, I2C, Timer
+# BME280 온습도 센서 제어 라이브러리 (서드파티)
+import bme280
+# BH1750 조도 센서 제어 라이브러리 (서드파티)
+import bh1750
+# SSD1306 OLED 디스플레이 제어 라이브러리 (서드파티)
+import ssd1306
+# 가비지 컬렉션을 위한 gc (메모리 관리)
+import gc
 
-/* ========== 네트워크 설정 (Network Configuration) ========== */
-const char* ssid = "WeVO_2.4G";        // 연결할 WiFi 네트워크의 이름 (SSID - Service Set Identifier)
-const char* password = "Toolbox,WEVO8358+";     // WiFi 네트워크의 WPA/WPA2 보안 비밀번호
+# ========== 네트워크 설정 구간 ==========
+# WiFi 네트워크 이름 - 실제 환경에 맞게 수정 필요
+WIFI_SSID = "WeVO_2.4G"
+# WiFi 네트워크 비밀번호 - 보안을 위해 실제 사용시 별도 파일로 관리 권장
+WIFI_PASSWORD = "WEVO8358"
 
-/* ========== 하드웨어 설정 (Hardware Configuration) ========== */
-Adafruit_BME280 bme;                    // BME280 센서 객체 생성 - I2C 통신으로 온도, 습도, 압력 측정
-const int ledPin = 41;                  // LED가 연결된 GPIO 핀 번호 (ESP32-S3의 41번 핀을 디지털 출력으로 사용)
+# ========== 하드웨어 핀 매핑 구간 ==========
+# PIR 모션 센서 핀 번호 - 인체 감지용 적외선 센서
+PIR_PIN = 21
+# 빨간색 LED 핀 번호 - 사용자 제어 가능한 상태 표시등
+LED_RED_PIN = 7
+# 초록색 LED 핀 번호 - PIR 감지시 자동 점등 + 사용자 제어
+LED_GREEN_PIN = 6
+# 택트 스위치 핀 번호 - 사용자 입력용 버튼
+BUTTON_PIN = 11
+# I2C 통신 SDA 핀 번호 - 모든 I2C 디바이스 공통 데이터 라인
+I2C_SDA = 4
+# I2C 통신 SCL 핀 번호 - 모든 I2C 디바이스 공통 클럭 라인
+I2C_SCL = 5
 
-/* ========== 웹서버 설정 (Web Server Configuration) ========== */
-AsyncWebServer server(80);              // 포트 80번에서 HTTP 웹서버 객체 생성 (80은 웹브라우저의 기본 포트)
+# ========== PIR 센서 재설정 함수 ==========
+def reset_pir_sensor():
 
-/* ========== LED 상태 저장 변수 ========== */
-bool ledState = false;                  // LED의 현재 상태를 저장하는 전역 변수 (false=꺼짐, true=켜짐)
+    # 1단계: PIR 핀을 일시적으로 출력 모드로 변경 (강제 제어를 위함)
+    temp_pin = Pin(PIR_PIN, Pin.OUT)
+    # 2단계: 핀을 LOW(0V) 상태로 강제 설정하여 센서 내부 회로 리셋
+    temp_pin.off()
+    # 3단계: 0.5초 대기로 센서 내부 커패시터 완전 방전 및 안정화
+    time.sleep(0.5)
+    # 4단계: 핀을 입력 모드로 복원, PULL_DOWN으로 노이즈 제거
+    return Pin(PIR_PIN, Pin.IN, Pin.PULL_DOWN)
 
-/* ========== 웹페이지 HTML 코드 (Web Page HTML Code) ========== */
-// R"rawliteral( )rawliteral" : C++11 원시 문자열 리터럴 문법으로 이스케이프 문자 없이 HTML 코드를 그대로 저장
-const char index_html[] = R"rawliteral(
-<!DOCTYPE HTML><html>  <!-- HTML5 문서 타입 선언 -->
+# ========== 하드웨어 초기화 구간 ==========
+# PIR 센서를 재설정하여 깨끗한 상태로 초기화
+pir = reset_pir_sensor()
+# 빨간 LED 핀을 출력 모드로 설정 (사용자 제어용)
+led_red = Pin(LED_RED_PIN, Pin.OUT)
+# 초록 LED 핀을 출력 모드로 설정 (PIR 연동 + 사용자 제어용)
+led_green = Pin(LED_GREEN_PIN, Pin.OUT)
+# 버튼 핀을 입력 모드로 설정, 내장 풀업 저항 활성화 (눌리지 않을 때 HIGH)
+button = Pin(BUTTON_PIN, Pin.IN, Pin.PULL_UP)
+
+# ========== I2C 버스 초기화 구간 ==========
+# I2C 버스 0번을 400kHz 속도로 초기화 (고속 모드)
+# SDA=4, SCL=5 핀으로 모든 I2C 디바이스와 통신
+i2c = I2C(0, sda=Pin(I2C_SDA), scl=Pin(I2C_SCL), freq=400000)
+
+# ========== 센서 객체 초기화 구간 ==========
+# 센서 객체들을 None으로 초기화 (연결 실패시 안전한 처리를 위함)
+bme280_sensor = None
+bh1750_sensor = None
+oled = None
+
+# BME280 온습도 센서 연결 시도 (여러 주소로 시도)
+try:
+    # 기본 I2C 주소로 BME280 객체 생성 시도
+    bme280_sensor = bme280.BME280(i2c=i2c)
+    print("BME280 sensor connected")
+except:
+    try:
+        # 대체 I2C 주소 0x76으로 재시도 (일부 보드는 다른 주소 사용)
+        bme280_sensor = bme280.BME280(i2c=i2c, address=0x76)
+        print("BME280 sensor connected (0x76)")
+    except:
+        # 모든 시도 실패시 에러 메시지 출력, 프로그램은 계속 실행
+        print("BME280 sensor connection failed")
+
+# BH1750 조도 센서 연결 시도 (다중 백업 방식)
+try:
+    # 기본 방식으로 BH1750 객체 생성 시도
+    bh1750_sensor = bh1750.BH1750(i2c)
+    print("BH1750 light sensor connected")
+except:
+    try:
+        # 명시적 주소 0x23으로 재시도
+        bh1750_sensor = bh1750.BH1750(i2c, addr=0x23)
+        print("BH1750 light sensor connected (0x23)")
+    except:
+        try:
+            # 대체 주소 0x5C로 재시도 (ADDR 핀 HIGH 상태)
+            bh1750_sensor = bh1750.BH1750(i2c, addr=0x5C)
+            print("BH1750 light sensor connected (0x5C)")
+        except:
+            # 라이브러리 실패시 수동 I2C 모드로 전환 (백업 방식)
+            print("BH1750 using manual I2C mode")
+            bh1750_sensor = "manual"
+
+# OLED 디스플레이 연결 시도
+try:
+    # 128x64 해상도 OLED 객체 생성, 기본 주소 0x3C 사용
+    oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+    # 화면 전체를 검은색으로 클리어
+    oled.fill(0)
+    # 시작 메시지 표시
+    oled.text("IoT Start", 0, 0)
+    # 화면 버퍼를 실제 디스플레이에 출력
+    oled.show()
+    print("OLED display connected")
+except:
+    # OLED 연결 실패시에도 프로그램 계속 실행 (선택적 디바이스)
+    print("OLED display connection failed")
+
+# ========== 전역 변수 선언 구간 ==========
+# LED 상태를 추적하는 불린 변수들 (웹에서 제어, OLED에 표시)
+led_red_state = False
+led_green_state = False
+# PIR 모션 감지 상태 추적 변수 (10초간 유지)
+motion_detected = False
+# 버튼 눌림 상태 추적 변수 (디바운싱 적용)
+button_pressed = False
+# 타이밍 제어용 변수들 (밀리초 단위 타임스탬프)
+last_button_time = 0
+last_motion_time = 0
+# PIR 센서 재설정 필요 여부 플래그
+pir_reset_needed = False
+# 웹 API로 전송할 센서 데이터 딕셔너리
+sensor_data = {
+    'temperature': 0.0,    # 온도 (°C)
+    'humidity': 0.0,       # 습도 (%)
+    'pressure': 0.0,       # 기압 (hPa)
+    'light': 0.0,          # 조도 (lux)
+    'motion': False,       # 모션 감지 여부
+    'button': False,       # 버튼 눌림 여부
+    'led_red': False,      # 빨간 LED 상태
+    'led_green': False     # 초록 LED 상태
+}
+
+# ========== 웹페이지 HTML 코드 ==========
+HTML_PAGE = """<!DOCTYPE HTML><html>
 <head>
-  <meta charset="UTF-8">  <!-- 문자 인코딩을 UTF-8로 설정하여 한글과 특수문자 지원 -->
-  <title>ESP32 IoT Dashboard - Real Time</title>  <!-- 브라우저 탭에 표시될 페이지 제목 -->
-  <meta name="viewport" content="width=device-width, initial-scale=1">  <!-- 모바일 기기에서 반응형 디스플레이 설정 -->
-  
-  <style>  <!-- CSS 스타일 시트 시작 -->
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }  /* 모든 요소의 기본 여백과 패딩 제거, box-sizing 통일 */
-    
-    body { 
-      font-family: Arial, sans-serif; 
-      background-color: #fafafa;
-      text-align: center;
-      padding-top: 80px;
-      width: 100%;
-    }  /* 전체 페이지: 중앙 정렬, 상단 여백 80px */
-    
-    .container {
-      margin: 0 auto;
-      width: 90%;
-      max-width: 500px;
-    }  /* 메인 컨테이너: margin auto로 중앙 정렬, 너비 90% 최대 500px */
-    
-    .card {   /* 각 센서 데이터와 LED 제어를 담는 카드 스타일 */
-      background: #f0f0f0;              // 연한 회색 배경색 (16진수 색상 코드)
-      padding: 20px;                    // 카드 내부 여백 20픽셀 (내용물과 테두리 사이)
-      margin: 15px 0;                   // 카드 외부 여백 (위아래 15px, 좌우 0)
-      border-radius: 10px;              // 카드 모서리를 10픽셀 반경으로 둥글게 처리
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);  // 그림자 효과: 수평0px, 수직2px, 흐림5px, 투명도10%
-      width: 100%;                      // 카드 너비를 컨테이너에 맞춤
-    }
-    
-    .button {  /* LED 제어 버튼의 스타일 */
-      background-color: #4CAF50;        // Material Design 초록색 배경
-      border: none;                     // 버튼 기본 테두리 제거
-      color: white;                     // 버튼 텍스트 색상을 흰색으로 설정
-      padding: 15px 32px;               // 버튼 내부 여백 (세로 15px, 가로 32px)
-      text-decoration: none;            // 링크 요소의 밑줄 제거
-      display: inline-block;            // 요소를 인라인 블록으로 표시 (가로 나열 가능, 크기 조절 가능)
-      font-size: 16px;                  // 버튼 텍스트 크기 16픽셀
-      margin: 4px 2px;                  // 버튼 외부 여백 (세로 4px, 가로 2px)
-      border-radius: 5px;               // 버튼 모서리를 5픽셀 반경으로 둥글게 처리
-      cursor: pointer;                  // 마우스 오버 시 손가락 모양 커서 표시 (클릭 가능함을 시각적으로 표현)
-    }
-    
-    h1 { 
-      color: #333; 
-      margin-bottom: 10px;
-      font-size: 28px;
-    }  /* 메인 제목: 진한 회색, 하단 여백, 큰 글자 크기 */
-    
-    h3 { 
-      color: #666; 
-      margin-bottom: 30px;
-      font-weight: normal;
-    }  /* 부제목: 회색, 하단 여백, 일반 굵기 */
-    .data {   /* 센서 데이터 숫자를 표시하는 스타일 */
-      font-size: 24px;                  // 센서 데이터 텍스트 크기를 24픽셀로 크게 설정
-      color: #0066cc;                   // 센서 데이터 색상을 파란색으로 설정
-    }
-    
-    .status-bar {  /* 화면 상단 고정 상태바 스타일 */
-      position: fixed;                  // 스크롤해도 항상 같은 위치에 고정
-      top: 0; left: 0; right: 0;       // 화면 최상단(top:0)에 전체 너비(left:0, right:0)로 배치
-      background: #4CAF50;              // 상태바 배경을 초록색으로 설정
-      color: white;                     // 상태바 텍스트 색상을 흰색으로 설정
-      padding: 10px;                    // 상태바 내부 여백 10픽셀
-      font-size: 14px;                  // 상태바 텍스트 크기 14픽셀
-      z-index: 1000;                   // 다른 모든 요소보다 앞에 표시 (숫자가 클수록 앞쪽)
-    }
-    
-    .status-bar.offline {               // 네트워크 연결 오류 시 상태바 스타일
-      background: #f44336;              // 오류 상태일 때 배경을 빨간색으로 변경
-    }
-    
-    .update-indicator {  /* 실시간 업데이트를 나타내는 작은 원형 표시기 */
-      display: inline-block;            // 인라인 블록 요소로 표시
-      width: 10px; height: 10px;       // 10x10 픽셀 크기의 정사각형
-      background: #4CAF50;              // 초록색 배경
-      border-radius: 50%;               // 50% 반지름으로 완전한 원형 만들기
-      margin-left: 10px;                // 왼쪽에 10픽셀 여백
-      animation: pulse 1s infinite;     // 'pulse' 애니메이션을 1초 간격으로 무한 반복
-    }
-    
-    @keyframes pulse {  /* 펄스 애니메이션 정의 - 깜박이는 효과 */
-      0% { opacity: 1; }                // 애니메이션 시작: 완전 불투명
-      50% { opacity: 0.5; }             // 애니메이션 중간: 50% 투명도
-      100% { opacity: 1; }              // 애니메이션 끝: 다시 완전 불투명
-    }
-  </style>
+    <meta charset="UTF-8">
+    <title>IoT Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        /* CSS 리셋 - 브라우저 기본 스타일 제거 */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        /* 전체 페이지 스타일 - 그라데이션 배경과 현대적 디자인 */
+        body { 
+            font-family: Arial, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        /* 메인 컨테이너 - glassmorphism 효과 적용 */
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 30px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        
+        /* 메인 제목 스타일 */
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        
+        /* 센서 데이터 그리드 레이아웃 - 반응형 디자인 */
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        /* 개별 센서 카드 스타일 - 호버 효과 포함 */
+        .sensor-card {
+            background: rgba(255,255,255,0.2);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255,255,255,0.3);
+            transition: transform 0.3s ease;
+        }
+        
+        /* 센서 카드 호버 효과 - 살짝 위로 올라가는 애니메이션 */
+        .sensor-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        /* 센서 수치 표시 스타일 - 크고 굵게 */
+        .sensor-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            margin: 10px 0;
+            color: #fff;
+        }
+        
+        /* 센서 라벨 스타일 */
+        .sensor-label {
+            font-size: 1.2em;
+            opacity: 0.8;
+            margin-bottom: 10px;
+        }
+        
+        /* LED 제어 패널 스타일 */
+        .control-panel {
+            background: rgba(255,255,255,0.2);
+            border-radius: 15px;
+            padding: 20px;
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        /* LED 제어 버튼 컨테이너 - 플렉스박스 레이아웃 */
+        .led-controls {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+        
+        /* LED 제어 버튼 기본 스타일 */
+        .led-button {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 25px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        
+        /* 빨간 LED 버튼 스타일 - 그라데이션 배경 */
+        .red-btn {
+            background: linear-gradient(45deg, #ff4757, #ff3838);
+            color: white;
+        }
+        
+        /* 초록 LED 버튼 스타일 - 그라데이션 배경 */
+        .green-btn {
+            background: linear-gradient(45deg, #2ed573, #1dd15b);
+            color: white;
+        }
+        
+        /* 버튼 호버 효과 - 위로 올라가며 그림자 강화 */
+        .led-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        
+        /* 상태 인디케이터 - 원형 LED 스타일 표시등 */
+        .status-indicator {
+            display: inline-block;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: pulse 2s infinite;
+        }
+        
+        /* 상태별 색상 정의 */
+        .status-on { background-color: #2ed573; }      /* 켜짐 - 초록색 */
+        .status-off { background-color: #ff4757; }     /* 꺼짐 - 빨간색 */
+        .status-motion { background-color: #ffa502; }  /* 감지 - 주황색 */
+        
+        /* 펄스 애니메이션 - 부드러운 깜박임 효과 */
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        /* 마지막 업데이트 시간 표시 스타일 */
+        .update-time {
+            text-align: center;
+            margin-top: 20px;
+            opacity: 0.7;
+            font-size: 0.9em;
+        }
+    </style>
 </head>
 <body>
+    <!-- 메인 컨테이너 시작 -->
+    <div class="container">
+        <!-- 페이지 제목 -->
+        <h1>IoT Dashboard</h1>
+        
+        <!-- 센서 데이터 그리드 - 6개 센서 카드 배치 -->
+        <div class="sensor-grid">
+            <!-- 온도 센서 카드 -->
+            <div class="sensor-card">
+                <div class="sensor-label">온도</div>
+                <div class="sensor-value" id="temperature">--°C</div>
+            </div>
+            
+            <!-- 습도 센서 카드 -->
+            <div class="sensor-card">
+                <div class="sensor-label">습도</div>
+                <div class="sensor-value" id="humidity">--%</div>
+            </div>
+            
+            <!-- 기압 센서 카드 -->
+            <div class="sensor-card">
+                <div class="sensor-label">기압</div>
+                <div class="sensor-value" id="pressure">-- hPa</div>
+            </div>
+            
+            <!-- 조도 센서 카드 -->
+            <div class="sensor-card">
+                <div class="sensor-label">조도</div>
+                <div class="sensor-value" id="light">-- lux</div>
+            </div>
+            
+            <!-- PIR 모션 감지 센서 카드 -->
+            <div class="sensor-card">
+                <div class="sensor-label">동작 감지</div>
+                <div class="sensor-value" id="motion">
+                    대기중 <span class="status-indicator status-off" id="motion-status"></span>
+                </div>
+            </div>
+            
+            <!-- 버튼 상태 카드 -->
+            <div class="sensor-card">
+                <div class="sensor-label">버튼 상태</div>
+                <div class="sensor-value" id="button">
+                    대기중 <span class="status-indicator status-off" id="button-status"></span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- LED 제어 패널 -->
+        <div class="control-panel">
+            <h3>LED 제어</h3>
+            <div class="led-controls">
+                <!-- 빨간 LED 제어 버튼 - 클릭시 toggle 방식 -->
+                <button class="led-button red-btn" onclick="controlLED('red', 'toggle')">
+                    빨간 LED <span class="status-indicator status-off" id="red-status"></span>
+                </button>
+                <!-- 초록 LED 제어 버튼 - 클릭시 toggle 방식 -->
+                <button class="led-button green-btn" onclick="controlLED('green', 'toggle')">
+                    초록 LED <span class="status-indicator status-off" id="green-status"></span>
+                </button>
+            </div>
+        </div>
+        
+        <!-- 마지막 업데이트 시간 표시 -->
+        <div class="update-time">
+            마지막 업데이트: <span id="lastUpdate">--</span>
+        </div>
+    </div>
 
-  <div class="container">  <!-- 메인 컨테이너 (모든 내용을 중앙 정렬) -->
-    <h1>ESP32 IoT Dashboard</h1>  <!-- 메인 제목 -->
-    <h3>Real-time Sensor Monitoring</h3>  <!-- 부제목 -->
-    
-    <div class="card" id="tempCard">  <!-- 온도 데이터 표시 카드 -->
-      <h2> Temperature</h2>  <!-- 온도계 이모지와 함께 온도 제목 -->
-      <div class="data" id="temperature">Loading...</div>  <!-- 온도 값이 표시될 영역 (초기값: Loading...) -->
-    </div>
-    
-    <div class="card" id="humCard">  <!-- 습도 데이터 표시 카드 -->
-      <h2> Humidity</h2>  <!-- 물방울 이모지와 함께 습도 제목 -->
-      <div class="data" id="humidity">Loading...</div>  <!-- 습도 값이 표시될 영역 (초기값: Loading...) -->
-    </div>
-    
-    <div class="card">  <!-- LED 제어 카드 -->
-      <h2> LED Control</h2>  <!-- 전구 이모지와 함께 LED 제어 제목 -->
-      <button onclick="controlLED('on')" class="button">LED ON</button>  <!-- LED 켜기 버튼 (클릭 시 controlLED('on') 함수 호출) -->
-      <button onclick="controlLED('off')" class="button" style="background-color:#f44336;">LED OFF</button>  <!-- LED 끄기 버튼 (빨간색 배경) -->
-    </div>
-  </div>  <!-- 컨테이너 끝 -->
-  
-  <script>  <!-- JavaScript 코드 시작 -->
-    let updateInterval;                 // setInterval 함수의 반환값을 저장할 변수 (타이머 제어용)
-    let updateCount = 0;                // 데이터 업데이트 횟수를 카운트하는 변수 (디버깅용)
-    let connectionFailed = false;       // 연결 실패 상태를 추적하는 변수
-    let retryCount = 0;                 // 재시도 횟수를 카운트하는 변수
-    
-    // 센서 데이터를 서버에서 가져오는 비동기 함수 (AJAX)
-    async function fetchSensorData() {
-      try {  // 에러 처리를 위한 try-catch 블록 시작
-        const response = await fetch('/sensors', {  // ESP32의 '/sensors' API에 HTTP GET 요청 보내기
-          timeout: 5000  // 5초 타임아웃 설정
-        });
+    <script>
+        // 전역 변수 선언
+        let updateInterval;  // setInterval 반환값 저장용 (자동 업데이트 제어)
         
-        if (!response.ok) {  // HTTP 응답이 성공이 아닌 경우
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // 센서 데이터를 서버에서 가져오는 비동기 함수
+        async function fetchSensorData() {
+            try {
+                // ESP32의 /sensors API에 GET 요청 보내기
+                const response = await fetch('/sensors');
+                // 응답을 JSON 객체로 파싱
+                const data = await response.json();
+                
+                // 온도 데이터 업데이트 (소수점 1자리까지 표시)
+                document.getElementById('temperature').textContent = data.temperature.toFixed(1) + '°C';
+                // 습도 데이터 업데이트 (소수점 1자리까지 표시)
+                document.getElementById('humidity').textContent = data.humidity.toFixed(1) + '%';
+                // 기압 데이터 업데이트 (소수점 1자리까지 표시)
+                document.getElementById('pressure').textContent = data.pressure.toFixed(1) + ' hPa';
+                // 조도 데이터 업데이트 (소수점 1자리까지 표시)
+                document.getElementById('light').textContent = data.light.toFixed(1) + ' lux';
+                
+                // PIR 모션 감지 상태 업데이트
+                const motionEl = document.getElementById('motion');
+                if (data.motion) {
+                    // 모션 감지시 주황색 인디케이터로 표시
+                    motionEl.innerHTML = '감지됨! <span class="status-indicator status-motion"></span>';
+                } else {
+                    // 모션 미감지시 빨간색 인디케이터로 표시
+                    motionEl.innerHTML = '대기중 <span class="status-indicator status-off"></span>';
+                }
+                
+                // 버튼 상태 업데이트
+                const buttonEl = document.getElementById('button');
+                if (data.button) {
+                    // 버튼 눌림시 초록색 인디케이터로 표시
+                    buttonEl.innerHTML = '눌림! <span class="status-indicator status-on"></span>';
+                } else {
+                    // 버튼 미눌림시 빨간색 인디케이터로 표시
+                    buttonEl.innerHTML = '대기중 <span class="status-indicator status-off"></span>';
+                }
+                
+                // LED 상태 인디케이터 업데이트
+                document.getElementById('red-status').className = 
+                    'status-indicator ' + (data.led_red ? 'status-on' : 'status-off');
+                document.getElementById('green-status').className = 
+                    'status-indicator ' + (data.led_green ? 'status-on' : 'status-off');
+                
+                // 마지막 업데이트 시간을 현재 시간으로 설정
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+                
+            } catch (error) {
+                // 네트워크 오류 또는 서버 오류시 콘솔에 에러 출력
+                console.error('Sensor data fetch failed:', error);
+            }
         }
         
-        const data = await response.json();        // 서버 응답을 JSON 객체로 변환
-        
-        // 연결 성공 시 상태 초기화
-        connectionFailed = false;
-        retryCount = 0;
-        
-        // HTML 요소의 내용을 실시간 센서 데이터로 업데이트
-        document.getElementById('temperature').innerHTML = data.temperature + '°C';  // 온도 데이터에 단위 추가하여 화면 업데이트
-        document.getElementById('humidity').innerHTML = data.humidity + '%';         // 습도 데이터에 단위 추가하여 화면 업데이트
-        
-        // 현재 시간을 마지막 업데이트 시간으로 표시
-        document.getElementById('lastUpdate').innerHTML = new Date().toLocaleTimeString();  // 현재 시간을 현지 시간 형식으로 변환하여 표시
-        
-        updateCount++;  // 업데이트 횟수 카운터 증가
-        
-        // 상태바를 정상 상태로 설정 (오류 상태 클래스 제거)
-        const statusBar = document.getElementById('statusBar');
-        statusBar.className = 'status-bar';
-        statusBar.innerHTML = '<span> Real-time Monitoring</span><span class="update-indicator"></span><span style="float: right;">Last Update: <span id="lastUpdate">' + new Date().toLocaleTimeString() + '</span></span>';
-        
-        // 브라우저 개발자 도구 콘솔에 업데이트 정보 출력 (디버깅용)
-        console.log('Update #' + updateCount + ' - Temp: ' + data.temperature + '°C, Humidity: ' + data.humidity + '%');
-        
-      } catch (error) {  // 네트워크 오류나 서버 오류 발생 시 처리
-        connectionFailed = true;
-        retryCount++;
-        
-        console.error('Update failed (attempt ' + retryCount + '):', error);  // 콘솔에 에러 메시지 출력
-        
-        const statusBar = document.getElementById('statusBar');
-        statusBar.className = 'status-bar offline';  // 상태바를 오류 상태(빨간색)로 변경
-        statusBar.innerHTML = ` Connection Error (${retryCount}) - Retrying...`;  // 재시도 횟수와 함께 오류 메시지 표시
-        
-        // 센서 데이터를 "연결 오류"로 표시
-        if (retryCount > 3) {  // 3번 이상 실패 시
-          document.getElementById('temperature').innerHTML = 'Connection Error';
-          document.getElementById('humidity').innerHTML = 'Connection Error';
-        }
-      }
-    }
-    
-    // LED 제어를 위한 비동기 함수
-    async function controlLED(state) {  // state 매개변수: 'on' 또는 'off'
-      try {  // 에러 처리를 위한 try-catch 블록 시작
-        const response = await fetch('/led/' + state, {  // ESP32의 LED 제어 API 호출 ('/led/on' 또는 '/led/off')
-          timeout: 3000  // 3초 타임아웃 설정
-        });
-        
-        if (!response.ok) {  // HTTP 응답이 성공이 아닌 경우
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // LED 제어 함수 - 비동기 방식으로 서버에 제어 명령 전송
+        async function controlLED(color, action) {
+            try {
+                // LED 제어 API 호출 (/led/red/toggle 또는 /led/green/toggle)
+                const response = await fetch(`/led/${color}/${action}`);
+                // 서버 응답을 텍스트로 받기
+                const result = await response.text();
+                // 콘솔에 제어 결과 로깅
+                console.log(`LED ${color} ${action}: ${result}`);
+                // 100ms 후 센서 데이터 즉시 업데이트 (상태 반영)
+                setTimeout(fetchSensorData, 100);
+            } catch (error) {
+                // LED 제어 실패시 콘솔에 에러 출력
+                console.error('LED control failed:', error);
+            }
         }
         
-        const result = await response.text();           // 서버 응답을 텍스트로 받기
-        console.log('LED ' + state.toUpperCase() + ' - ' + result);  // 콘솔에 LED 제어 결과 출력
-        
-        // 사용자에게 LED 제어 상태를 시각적으로 피드백 제공
-        const statusBar = document.getElementById('statusBar');  // 상태바 요소 가져오기
-        const originalContent = statusBar.innerHTML;            // 원래 상태바 내용 백업
-        
-        if (state === 'on') {  // LED 켜기 명령인 경우
-          statusBar.innerHTML = ' LED ON ';     // 상태바에 LED 켜짐 메시지 표시
-          statusBar.style.background = '#FF9800';              // 상태바 배경을 주황색으로 변경
-        } else {  // LED 끄기 명령인 경우
-          statusBar.innerHTML = ' LED OFF ';     // 상태바에 LED 꺼짐 메시지 표시
-          statusBar.style.background = '#9E9E9E';              // 상태바 배경을 회색으로 변경
+        // 자동 업데이트 시작 함수 - 1초마다 센서 데이터 자동 갱신
+        function startAutoUpdate() {
+            updateInterval = setInterval(fetchSensorData, 1000);
         }
         
-        // 2초 후 상태바를 원래 상태로 복구
-        setTimeout(() => {  // 타이머 함수 설정
-          statusBar.innerHTML = originalContent;      // 원래 상태바 내용으로 복구
-          statusBar.style.background = '#4CAF50';     // 원래 초록색 배경으로 복구
-        }, 2000);  // 2000밀리초 (2초) 후 실행
-        
-      } catch (error) {  // LED 제어 실패 시 처리
-        console.error('LED control failed:', error);  // 콘솔에 에러 메시지 출력
-        
-        // 상태바에 LED 제어 실패 메시지 표시
-        const statusBar = document.getElementById('statusBar');
-        const originalContent = statusBar.innerHTML;
-        statusBar.innerHTML = ' LED 제어 실패 - ESP32 연결을 확인하세요';
-        statusBar.style.background = '#f44336';
-        
-        // 3초 후 원래 상태로 복구
-        setTimeout(() => {
-          statusBar.innerHTML = originalContent;
-          statusBar.style.background = '#4CAF50';
-        }, 3000);
-      }
-    }
-    
-    // 1초마다 자동으로 센서 데이터를 업데이트하는 함수
-    function startAutoUpdate() {
-      updateInterval = setInterval(() => {  // 1초 간격으로 반복 실행할 타이머 설정
-        fetchSensorData();  // 센서 데이터 가져오기 함수 호출
-      }, 1000);  // 1000밀리초 (1초) 간격
-    }
-    
-    // 연결 상태 체크 및 복구 함수
-    function checkConnection() {
-      if (connectionFailed && retryCount > 5) {  // 5번 이상 실패 시
-        console.log('연결 복구 시도 중...');
-        retryCount = 0;  // 재시도 카운터 리셋
-        
-        // 상태바 메시지 업데이트
-        const statusBar = document.getElementById('statusBar');
-        statusBar.innerHTML = ' 연결 복구 시도 중...';
-        statusBar.style.background = '#FF9800';  // 주황색으로 변경
-      }
-    }
-    
-    // 페이지가 완전히 로드된 후 실행되는 초기화 함수
-    window.onload = function() {
-      console.log('ESP32 IoT Dashboard 시작');  // 시작 메시지
-      fetchSensorData();  // 페이지 로드 즉시 센서 데이터 한 번 가져오기
-      startAutoUpdate();  // 자동 업데이트 타이머 시작
-      
-      // 10초마다 연결 상태 체크
-      setInterval(checkConnection, 10000);
-    };
-  </script>
+        // 페이지 로드 완료시 실행되는 초기화 함수
+        window.onload = function() {
+            console.log('IoT Dashboard started');
+            // 페이지 로드 즉시 센서 데이터 한번 가져오기
+            fetchSensorData();
+            // 자동 업데이트 타이머 시작
+            startAutoUpdate();
+        };
+    </script>
 </body>
-</html>)rawliteral";
+</html>"""
 
-/* ========== 초기 설정 함수 (Setup Function) ========== */
-// setup() 함수는 ESP32가 부팅될 때 단 한 번만 실행되는 초기화 함수
-void setup() {
-  Serial.begin(115200);                 // 시리얼 통신 초기화 (컴퓨터와 115200 bps 속도로 통신)
-  
-  pinMode(ledPin, OUTPUT);              // GPIO 41번 핀을 디지털 출력 모드로 설정
-  digitalWrite(ledPin, LOW);            // LED 초기 상태를 OFF로 설정 (0V 출력)
-  ledState = false;                     // LED 상태 저장 변수도 false(꺼짐)로 초기화
-  
-  // BME280 센서 초기화 및 연결 확인
-  if (!bme.begin(0x76)) {               // I2C 주소 0x76으로 BME280 센서 초기화 시도
-    Serial.println("BME280 sensor not found!");  // 센서 연결 실패 시 에러 메시지 출력
-    while (1);                          // 무한 루프로 프로그램 중단 (센서 없이는 실행 불가)
-  }
-  
-  // WiFi 네트워크 연결 시작
-  WiFi.begin(ssid, password);           // 설정된 SSID와 비밀번호로 WiFi 연결 시도
-  Serial.print("Connecting to WiFi");   // 연결 진행 상태 메시지 출력
-  
-  // WiFi 연결이 완료될 때까지 대기
-  while (WiFi.status() != WL_CONNECTED) {  // WiFi 연결 상태가 WL_CONNECTED가 아닌 동안 반복
-    delay(500);                         // 0.5초 대기
-    Serial.print(".");                  // 연결 진행 상황을 점(.)으로 시각적 표시
-  }
-  
-  // WiFi 연결 완료 후 정보 출력
-  Serial.println();                     // 줄바꿈
-  Serial.print("WiFi connected! IP address: ");  // 연결 성공 메시지
-  Serial.println(WiFi.localIP());       // DHCP에서 할당받은 IP 주소 출력 (이 주소로 웹브라우저 접속)
-  
-  /* ========== 웹서버 라우팅 설정 ========== */
-  
-  // 메인 페이지 요청 처리 (http://IP주소/ 접속 시)
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {  // 루트 경로에 대한 GET 요청 처리
-    request->send(200, "text/html; charset=utf-8", index_html);  // HTTP 200 OK 응답과 함께 HTML 페이지 전송
-  });
-  
-  // 센서 데이터 API 엔드포인트 (AJAX 요청 처리용)
-  server.on("/sensors", HTTP_GET, [](AsyncWebServerRequest *request) {  // '/sensors' 경로에 대한 GET 요청 처리
-    String json = "{";                  // JSON 문자열 시작
-    json += "\"temperature\":" + String(bme.readTemperature(), 1) + ",";  // 온도 데이터 (소수점 1자리)
-    json += "\"humidity\":" + String(bme.readHumidity(), 1);              // 습도 데이터 (소수점 1자리)
-    json += "}";                        // JSON 문자열 끝
+# ========== WiFi 연결 함수 ==========
+def connect_wifi():
+    """
+    WiFi 네트워크 연결 함수
+    반환값: 연결 성공시 IP 주소, 실패시 None
+    """
+    # WiFi 스테이션 모드로 네트워크 객체 생성
+    wlan = network.WLAN(network.STA_IF)
+    # WiFi 인터페이스 활성화
+    wlan.active(True)
     
-    request->send(200, "application/json", json);  // JSON 형식으로 센서 데이터 응답
-  });
-  
-  // LED 켜기 API 엔드포인트
-  server.on("/led/on", HTTP_GET, [](AsyncWebServerRequest *request) {  // '/led/on' 경로에 대한 GET 요청 처리
-    digitalWrite(ledPin, HIGH);          // GPIO 41번 핀에 HIGH(3.3V) 신호 출력하여 LED 켜기
-    ledState = true;                     // LED 상태 변수를 true(켜짐)로 업데이트
-    Serial.println("LED ON ");  // 시리얼 모니터에 LED 켜짐 상태 출력
-    request->send(200, "text/plain", "LED ON");     // 클라이언트에 성공 응답 전송
-  });
-  
-  // LED 끄기 API 엔드포인트
-  server.on("/led/off", HTTP_GET, [](AsyncWebServerRequest *request) {  // '/led/off' 경로에 대한 GET 요청 처리
-    digitalWrite(ledPin, LOW);           // GPIO 41번 핀에 LOW(0V) 신호 출력하여 LED 끄기
-    ledState = false;                    // LED 상태 변수를 false(꺼짐)로 업데이트
-    Serial.println("LED OFF"); // 시리얼 모니터에 LED 꺼짐 상태 출력
-    request->send(200, "text/plain", "LED OFF");    // 클라이언트에 성공 응답 전송
-  });
-  
-  // 웹서버 시작
-  server.begin();                       // 설정된 모든 라우팅으로 웹서버 가동 시작
-  Serial.println("Web server started!");  // 웹서버 시작 완료 메시지
-  Serial.println("Real-time dashboard with 1-second updates ready!");  // 시스템 준비 완료 안내
-}
+    # 이미 연결되어 있지 않은 경우에만 연결 시도
+    if not wlan.isconnected():
+        print(f'Connecting to WiFi: {WIFI_SSID}')
+        # 설정된 SSID와 비밀번호로 WiFi 연결 시도
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+        
+        # 연결 타임아웃 설정 (최대 20초)
+        timeout = 20
+        # 연결 완료 또는 타임아웃까지 대기
+        while not wlan.isconnected() and timeout > 0:
+            print('.', end='')  # 진행 상황 표시
+            time.sleep(1)       # 1초 대기
+            timeout -= 1        # 타임아웃 카운터 감소
+        
+        # 타임아웃 발생시 연결 실패 처리
+        if not wlan.isconnected():
+            print('\nWiFi connection failed!')
+            return None
+    
+    # 연결 성공시 할당받은 IP 주소 가져오기
+    ip = wlan.ifconfig()[0]
+    print(f'\nWiFi connected! IP: {ip}')
+    
+    # OLED가 연결되어 있으면 WiFi 연결 정보 표시
+    if oled:
+        oled.fill(0)  # 화면 클리어
+        oled.text("WiFi Connected!", 0, 0)   # 연결 메시지
+        oled.text(f"IP: {ip}", 0, 20)        # IP 주소 표시
+        oled.show()   # 화면 업데이트
+    
+    return ip
 
-/* ========== 메인 루프 함수 (Main Loop Function) ========== */
-// loop() 함수는 setup() 완료 후 프로그램이 종료될 때까지 무한 반복 실행
-void loop() {
-  // LED 상태를 지속적으로 유지 (다른 요인으로 인한 상태 변경 방지)
-  digitalWrite(ledPin, ledState ? HIGH : LOW);  // 삼항연산자: ledState가 true면 HIGH, false면 LOW 출력
-  
-  // 시리얼 모니터 출력 제어 (5초마다 한 번씩만 출력)
-  static unsigned long lastSerialOutput = 0;    // 마지막 시리얼 출력 시간을 저장하는 정적 변수
-  if (millis() - lastSerialOutput > 5000) {     // 현재 시간에서 마지막 출력 시간을 뺀 값이 5000ms(5초)보다 크면
-    Serial.print("Temperature: ");             // 온도 라벨 출력
-    Serial.print(bme.readTemperature());       // BME280에서 실시간 온도 값 읽어서 출력
-    Serial.print("°C, Humidity: ");            // 온도 단위와 습도 라벨 출력
-    Serial.print(bme.readHumidity());          // BME280에서 실시간 습도 값 읽어서 출력
-    Serial.print("%, LED: ");                  // 습도 단위와 LED 라벨 출력
-    Serial.println(ledState ? "ON" : "OFF");   // 삼항연산자: LED 상태를 문자열로 출력 후 줄바꿈
-    lastSerialOutput = millis();               // 현재 시간을 마지막 출력 시간으로 업데이트
-  }
-  
-  delay(100);  // 0.1초 지연으로 CPU 부하 감소 및 시스템 안정성 확보
-}
+# ========== 센서 데이터 읽기 함수 ==========
+def read_sensors():
+    """
+    모든 센서에서 데이터를 읽어와 sensor_data 딕셔너리 업데이트
+    PIR 센서의 자동 재설정 및 타이밍 제어도 담당
+    """
+    # 전역 변수들을 함수 내에서 수정하기 위한 global 선언
+    global sensor_data, motion_detected, button_pressed, last_button_time
+    global last_motion_time, pir_reset_needed, pir
+    
+    try:
+        # ===== BME280 온습도 센서 읽기 =====
+        if bme280_sensor:
+            try:
+                # 방법 1: values 속성 사용 (문자열 형태로 반환)
+                readings = bme280_sensor.values
+                if len(readings) == 3:
+                    temp_str, press_str, hum_str = readings
+                    # 문자열에서 숫자만 추출하여 float 변환
+                    sensor_data['temperature'] = float(temp_str.replace('C', '').replace('°', '').strip())
+                    sensor_data['pressure'] = float(press_str.replace('hPa', '').strip()) 
+                    sensor_data['humidity'] = float(hum_str.replace('%', '').strip())
+                else:
+                    raise Exception("값 형식 오류")
+            except:
+                try:
+                    # 방법 2: 개별 속성 사용 (숫자 형태로 직접 반환)
+                    sensor_data['temperature'] = float(bme280_sensor.temperature)
+                    sensor_data['pressure'] = float(bme280_sensor.pressure)
+                    sensor_data['humidity'] = float(bme280_sensor.humidity)
+                except:
+                    # BME280 읽기 실패시 기존 값 유지 (오류 내용은 무시)
+                    pass
+        
+        # ===== BH1750 조도 센서 읽기 =====
+        if bh1750_sensor:
+            try:
+                if bh1750_sensor == "manual":
+                    # 수동 I2C 모드: 라이브러리 없이 직접 통신
+                    # BH1750에 연속 고해상도 측정 명령 전송 (0x10)
+                    i2c.writeto(0x23, bytes([0x10]))
+                    # 측정 완료까지 120ms 대기 (데이터시트 권장 시간)
+                    time.sleep_ms(120)
+                    # 2바이트 조도 데이터 읽기
+                    data = i2c.readfrom(0x23, 2)
+                    # 16비트 데이터를 lux 값으로 변환 (공식: (MSB<<8 | LSB) / 1.2)
+                    lux_value = ((data[0] << 8) | data[1]) / 1.2
+                    sensor_data['light'] = float(lux_value)
+                else:
+                    # 라이브러리 모드: 여러 API 메소드 순차 시도
+                    try:
+                        sensor_data['light'] = float(bh1750_sensor.luminance)
+                    except:
+                        try:
+                            sensor_data['light'] = float(bh1750_sensor.measurement)
+                        except:
+                            try:
+                                sensor_data['light'] = float(bh1750_sensor.read())
+                            except:
+                                # 라이브러리 실패시 수동 방식으로 대체
+                                i2c.writeto(0x23, bytes([0x10]))
+                                time.sleep_ms(120)
+                                data = i2c.readfrom(0x23, 2)
+                                sensor_data['light'] = ((data[0] << 8) | data[1]) / 1.2
+            except Exception as e:
+                print(f"BH1750 read error: {e}")
+                # 조도 센서 읽기 실패시 0으로 설정
+                sensor_data['light'] = 0.0
+        
+        # ===== PIR 모션 센서 처리 =====
+        current_time = time.ticks_ms()  # 현재 시간 (밀리초)
+        
+        # PIR 재설정이 필요한 경우 처리
+        if pir_reset_needed:
+            # 센서 재설정 수행
+            pir = reset_pir_sensor()
+            pir_reset_needed = False
+            # 재설정 후 안정화를 위한 짧은 대기
+            time.sleep_ms(100)
+        
+        # PIR 감지 로직 (Active High 방식: 1=감지, 0=미감지)
+        if pir.value() == 1:
+            if not motion_detected:
+                # 새로운 모션 감지 시작
+                motion_detected = True
+                last_motion_time = current_time
+                sensor_data['motion'] = True
+                # PIR 감지시 초록 LED 자동 점등 (시각적 피드백)
+                led_green.value(1)
+        
+        # 모션 감지 타임아웃 처리 (10초 후 자동 해제)
+        if motion_detected and time.ticks_diff(current_time, last_motion_time) > 10000:
+            # 모션 감지 상태 해제
+            motion_detected = False
+            sensor_data['motion'] = False
+            # 초록 LED를 사용자 설정 상태로 복원
+            led_green.value(led_green_state)
+            # PIR 센서 재설정 예약 (다음 감지 준비)
+            pir_reset_needed = True
+        
+        # ===== 버튼 입력 처리 (디바운싱 적용) =====
+        current_time = time.ticks_ms()
+        # 풀업 저항 사용으로 논리 반전 (눌림=LOW, 안눌림=HIGH)
+        button_state = not button.value()
+        
+        # 버튼 눌림 감지 (상승 엣지 검출)
+        if button_state and not button_pressed:
+            # 디바운싱: 마지막 버튼 이벤트로부터 200ms 이상 경과 확인
+            if time.ticks_diff(current_time, last_button_time) > 200:
+                button_pressed = True
+                sensor_data['button'] = True
+                last_button_time = current_time
+        # 버튼 놓음 감지 (하강 엣지 검출)
+        elif not button_state:
+            button_pressed = False
+            sensor_data['button'] = False
+        
+        # ===== LED 상태 업데이트 =====
+        # 현재 LED 상태를 센서 데이터에 반영 (웹 표시용)
+        sensor_data['led_red'] = led_red_state
+        sensor_data['led_green'] = led_green_state
+        
+    except Exception as e:
+        # 센서 읽기 중 예외 발생시 에러 로깅
+        print(f"Sensor read error: {e}")
+
+# ========== OLED 디스플레이 업데이트 함수 ==========
+def update_oled():
+    """
+    OLED 화면에 센서 데이터와 시스템 상태 표시
+    128x64 픽셀 화면에 5줄의 정보 출력
+    """
+    # OLED가 연결되지 않은 경우 함수 종료
+    if not oled:
+        return
+    
+    try:
+        # 화면 전체를 검은색으로 클리어
+        oled.fill(0)
+        # 1줄: 프로그램 제목 표시
+        oled.text("IoT Dashboard", 0, 0)
+        # 2줄: 온도와 습도 (소수점 1자리)
+        oled.text(f"T:{sensor_data['temperature']:.1f}C", 0, 15)
+        oled.text(f"H:{sensor_data['humidity']:.1f}%", 0, 25)
+        # 3줄: 조도 (정수 표시)
+        oled.text(f"L:{sensor_data['light']:.0f}lux", 0, 35)
+        
+        # 4줄: PIR 상태를 간단한 문자로 표시
+        pir_value = pir.value()  # 현재 PIR 센서 하드웨어 값
+        if motion_detected:
+            # 모션 감지 중: "PIR:1/o" (o = detected)
+            pir_status = f"PIR:{pir_value}/o"
+        else:
+            # 모션 미감지: "PIR:0/x" (x = idle)
+            pir_status = f"PIR:{pir_value}/x"
+        oled.text(pir_status, 0, 45)
+        
+        # 5줄: 제어 상태 표시 (버튼, LED 상태)
+        status_line = ""
+        if sensor_data['button']:
+            status_line += "B"     # Button pressed
+        if led_red_state:
+            status_line += "R"     # Red LED on
+        if led_green_state:
+            status_line += "G"     # Green LED on
+        
+        # 상태가 있는 경우에만 표시
+        if status_line:
+            oled.text(f"Ctrl: {status_line}", 0, 55)
+        
+        # 화면 버퍼를 실제 OLED에 출력
+        oled.show()
+        
+    except Exception as e:
+        # OLED 업데이트 실패시 에러 로깅
+        print(f"OLED update error: {e}")
+
+# ========== HTTP 요청 파싱 함수 ==========
+def parse_request(request):
+    """
+    HTTP 요청 문자열에서 메소드와 경로 추출
+    예: "GET /sensors HTTP/1.1" → ("GET", "/sensors")
+    """
+    lines = request.split('\r\n')  # HTTP 요청을 줄별로 분할
+    if len(lines) > 0:
+        request_line = lines[0]     # 첫 번째 줄이 요청 라인
+        # 요청 라인을 공백으로 분할하여 메소드, 경로, 프로토콜 추출
+        method, path, _ = request_line.split(' ')
+        return method, path
+    return None, None
+
+# ========== 웹서버 클라이언트 처리 함수 ==========
+async def handle_client(reader, writer):
+    """
+    비동기 웹서버의 클라이언트 요청 처리 함수
+    각 HTTP 요청에 대해 적절한 응답 생성 및 전송
+    """
+    # 전역 변수들을 함수 내에서 수정하기 위한 global 선언
+    global led_red_state, led_green_state, motion_detected, last_motion_time, sensor_data, pir_reset_needed
+    
+    try:
+        # 클라이언트로부터 HTTP 요청 읽기 (최대 1024바이트)
+        request = await reader.read(1024)
+        # 바이트 데이터를 UTF-8 문자열로 디코딩
+        request = request.decode('utf-8')
+        
+        # HTTP 요청에서 메소드와 경로 추출
+        method, path = parse_request(request)
+        
+        # ===== 라우팅: 경로별 처리 =====
+        if path == '/':
+            # 루트 경로: 메인 HTML 페이지 전송
+            response = f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{HTML_PAGE}"
+            
+        elif path == '/sensors':
+            # 센서 데이터 API: JSON 형태로 센서 데이터 전송
+            read_sensors()  # 최신 센서 데이터 읽기
+            json_data = json.dumps(sensor_data)  # 딕셔너리를 JSON 문자열로 변환
+            response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{json_data}"
+            
+        elif path.startswith('/led/'):
+            # LED 제어 API: URL 경로에서 색상과 동작 추출
+            parts = path.split('/')  # "/led/red/toggle" → ["", "led", "red", "toggle"]
+            if len(parts) >= 4:
+                color = parts[2]    # "red" 또는 "green"
+                action = parts[3]   # "on", "off", "toggle"
+                
+                # 빨간 LED 제어
+                if color == 'red':
+                    if action == 'on':
+                        led_red_state = True
+                    elif action == 'off':
+                        led_red_state = False
+                    elif action == 'toggle':
+                        led_red_state = not led_red_state  # 현재 상태 반전
+                    led_red.value(led_red_state)  # 하드웨어에 상태 적용
+                    
+                # 초록 LED 제어
+                elif color == 'green':
+                    if action == 'on':
+                        led_green_state = True
+                    elif action == 'off':
+                        led_green_state = False
+                    elif action == 'toggle':
+                        led_green_state = not led_green_state  # 현재 상태 반전
+                    led_green.value(led_green_state)  # 하드웨어에 상태 적용
+                
+                # 제어 완료 응답
+                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{color} LED {action}"
+            else:
+                # 잘못된 LED 명령 형식
+                response = "HTTP/1.1 400 Bad Request\r\n\r\nInvalid LED command"
+        else:
+            # 존재하지 않는 경로: 404 오류
+            response = "HTTP/1.1 404 Not Found\r\n\r\nPage Not Found"
+        
+        # 생성된 HTTP 응답을 클라이언트에 전송
+        writer.write(response.encode('utf-8'))
+        await writer.drain()  # 전송 완료까지 대기
+        
+    except Exception as e:
+        # 클라이언트 처리 중 오류 발생시
+        print(f"Client handling error: {e}")
+        try:
+            # 500 서버 오류 응답 전송
+            writer.write("HTTP/1.1 500 Internal Server Error\r\n\r\nServer Error".encode('utf-8'))
+            await writer.drain()
+        except:
+            pass  # 오류 응답 전송도 실패한 경우 무시
+    finally:
+        # 클라이언트 연결 정리
+        try:
+            writer.close()           # 연결 종료
+            await writer.wait_closed()  # 종료 완료까지 대기
+        except:
+            pass  # 연결 정리 실패시 무시
+
+# ========== 메인 실행 함수 ==========
+async def main():
+    """
+    메인 비동기 함수: 웹서버 시작 및 백그라운드 태스크 실행
+    여러 작업을 동시에 수행하는 멀티태스킹 구현
+    """
+    # 전역 변수 초기화
+    global last_button_time, last_motion_time, pir_reset_needed
+    last_button_time = time.ticks_ms()
+    last_motion_time = time.ticks_ms()
+    pir_reset_needed = False
+    
+    # WiFi 연결 시도
+    ip = connect_wifi()
+    if not ip:
+        print("WiFi connection failed, exiting.")
+        return
+    
+    # 비동기 웹서버 시작 (모든 인터페이스, 포트 80)
+    server = await asyncio.start_server(handle_client, '0.0.0.0', 80)
+    print(f"Web server started: http://{ip}")
+    print("IoT Dashboard ready!")
+    
+    # ===== 백그라운드 태스크 정의 =====
+    async def oled_task():
+        """OLED 화면 업데이트 태스크 (2초 간격)"""
+        while True:
+            update_oled()           # OLED 화면 업데이트
+            await asyncio.sleep(2)  # 2초 대기
+    
+    async def sensor_task():
+        """센서 데이터 읽기 태스크 (0.5초 간격)"""
+        while True:
+            read_sensors()           # 모든 센서 데이터 읽기
+            await asyncio.sleep(0.5) # 0.5초 대기
+    
+    # ===== 모든 태스크를 동시에 실행 =====
+    await asyncio.gather(
+        server.wait_closed(),  # 웹서버 실행 (클라이언트 요청 처리)
+        oled_task(),          # OLED 업데이트 (2초마다)
+        sensor_task()         # 센서 모니터링 (0.5초마다)
+    )
+
+# ========== 프로그램 진입점 ==========
+if __name__ == '__main__':
+    try:
+        # LED 초기 상태 설정 (모두 끄기)
+        led_red.value(0)
+        led_green.value(0)
+        
+        # 시작 메시지 출력
+        print("PIR sensor reset and initialization complete")
+        print("IoT Dashboard starting...")
+        
+        # 메인 비동기 함수 실행 (이벤트 루프 시작)
+        asyncio.run(main())
+        
+    except KeyboardInterrupt:
+        # Ctrl+C로 프로그램 종료시
+        print("\nProgram terminated")
+    except Exception as e:
+        # 예상치 못한 오류 발생시
+        print(f"Error occurred: {e}")
+    finally:
+        # 프로그램 종료시 정리 작업
+        led_red.value(0)      # 빨간 LED 끄기
+        led_green.value(0)    # 초록 LED 끄기
+        if oled:
+            oled.fill(0)      # OLED 화면 클리어
+            oled.text("System Stopped", 0, 0)  # 종료 메시지
+            oled.show()       # 화면 업데이트
+        print("System cleanup complete")
