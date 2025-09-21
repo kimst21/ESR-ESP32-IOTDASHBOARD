@@ -1,203 +1,370 @@
-/*
-===============================================================================
-                        ESP32 간단 IoT 대시보드 프로젝트
-===============================================================================
-
-[프로젝트 개요]
-- ESP32를 사용한 웹 기반 IoT 대시보드
-- BME280 센서로 온도/습도 측정
-- 웹페이지를 통한 LED 제어
-- WiFi를 통한 원격 모니터링 및 제어
-
-[필요한 하드웨어]
-1. ESP32 개발보드
-2. BME280 온습도 센서 (I2C 연결)
-3. LED + 저항 (220Ω)
-4. 브레드보드 및 점퍼선
-
-[연결 방법]
-- BME280: SDA → GPIO21, SCL → GPIO22, VCC → 3.3V, GND → GND
-- LED: Anode(+) → GPIO45, Cathode(-) → 저항 → GND
-
-[사용법]
-1. WiFi 정보 수정 (ssid, password)
-2. 코드 업로드 후 시리얼 모니터에서 IP 주소 확인
-3. 브라우저에서 해당 IP 주소로 접속
-4. 온습도 확인 및 LED 제어
-
-[작성자] : ESP32 IoT 학습용
-[날짜] : 2024
-===============================================================================
-*/
-
 /* ========== 라이브러리 포함 (Include Libraries) ========== */
-#include "WiFi.h"                // ESP32의 WiFi 연결 기능을 사용하기 위한 라이브러리
-#include "ESPAsyncWebServer.h"   // 비동기 웹서버 생성 (여러 클라이언트 동시 처리 가능)
-#include <Adafruit_BME280.h>     // BME280 온습도 센서 제어 라이브러리
-#include <Adafruit_Sensor.h>     // Adafruit 센서의 공통 기능 제공 라이브러리
+#include "WiFi.h"                // ESP32의 WiFi 연결 및 네트워크 통신 기능을 사용하기 위한 라이브러리
+#include "ESPAsyncWebServer.h"   // 비동기 웹서버 생성 라이브러리 (여러 클라이언트의 HTTP 요청을 동시에 처리 가능)
+#include <Adafruit_BME280.h>     // BME280 온습도 센서를 제어하기 위한 Adafruit 라이브러리
+#include <Adafruit_Sensor.h>     // Adafruit 센서들의 공통 기능과 인터페이스를 제공하는 기반 라이브러리
 
 /* ========== 네트워크 설정 (Network Configuration) ========== */
-const char* ssid = "YOUR_WIFI_NAME";        // 연결할 WiFi 네트워크 이름 (SSID)
-const char* password = "YOUR_WIFI_PASSWORD"; // WiFi 네트워크 비밀번호
+const char* ssid = "WeVO_2.4G";        // 연결할 WiFi 네트워크의 이름 (SSID - Service Set Identifier)
+const char* password = "Toolbox,WEVO8358+";     // WiFi 네트워크의 WPA/WPA2 보안 비밀번호
 
 /* ========== 하드웨어 설정 (Hardware Configuration) ========== */
-Adafruit_BME280 bme;    // BME280 센서 객체 생성 (I2C 통신으로 온습도 측정)
-const int ledPin = 45;  // LED가 연결된 GPIO 핀 번호 (ESP32의 45번 핀)
+Adafruit_BME280 bme;                    // BME280 센서 객체 생성 - I2C 통신으로 온도, 습도, 압력 측정
+const int ledPin = 41;                  // LED가 연결된 GPIO 핀 번호 (ESP32-S3의 41번 핀을 디지털 출력으로 사용)
 
 /* ========== 웹서버 설정 (Web Server Configuration) ========== */
-AsyncWebServer server(80);  // HTTP 기본 포트인 80번에서 웹서버 실행
+AsyncWebServer server(80);              // 포트 80번에서 HTTP 웹서버 객체 생성 (80은 웹브라우저의 기본 포트)
+
+/* ========== LED 상태 저장 변수 ========== */
+bool ledState = false;                  // LED의 현재 상태를 저장하는 전역 변수 (false=꺼짐, true=켜짐)
 
 /* ========== 웹페이지 HTML 코드 (Web Page HTML Code) ========== */
-// R"rawliteral( )rawliteral" : C++11 원시 문자열 리터럴 문법
-// 따옴표나 백슬래시 이스케이프 없이 HTML 코드를 그대로 저장 가능
+// R"rawliteral( )rawliteral" : C++11 원시 문자열 리터럴 문법으로 이스케이프 문자 없이 HTML 코드를 그대로 저장
 const char index_html[] = R"rawliteral(
 <!DOCTYPE HTML><html>  <!-- HTML5 문서 타입 선언 -->
 <head>
-  <title>간단 IoT 대시보드</title>  <!-- 브라우저 탭에 표시될 제목 -->
-  <!-- 모바일 기기에서 화면 크기에 맞게 표시하도록 설정 -->
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">  <!-- 문자 인코딩을 UTF-8로 설정하여 한글과 특수문자 지원 -->
+  <title>ESP32 IoT Dashboard - Real Time</title>  <!-- 브라우저 탭에 표시될 페이지 제목 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">  <!-- 모바일 기기에서 반응형 디스플레이 설정 -->
   
-  <!-- CSS 스타일 정의 (웹페이지 디자인) -->
-  <style>
-    /* 전체 페이지 스타일 */
-    body { font-family: Arial; text-align: center; margin: 50px; }
+  <style>  <!-- CSS 스타일 시트 시작 -->
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }  /* 모든 요소의 기본 여백과 패딩 제거, box-sizing 통일 */
     
-    /* 카드 형태의 박스 스타일 (센서 데이터 표시용) */
-    .card { 
-      background: #f0f0f0;                    /* 연한 회색 배경 */
-      padding: 20px;                          /* 내부 여백 */
-      margin: 10px;                           /* 외부 여백 */
-      border-radius: 10px;                    /* 모서리 둥글게 */
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);  /* 그림자 효과 */
+    body { 
+      font-family: Arial, sans-serif; 
+      background-color: #fafafa;
+      text-align: center;
+      padding-top: 80px;
+      width: 100%;
+    }  /* 전체 페이지: 중앙 정렬, 상단 여백 80px */
+    
+    .container {
+      margin: 0 auto;
+      width: 90%;
+      max-width: 500px;
+    }  /* 메인 컨테이너: margin auto로 중앙 정렬, 너비 90% 최대 500px */
+    
+    .card {   /* 각 센서 데이터와 LED 제어를 담는 카드 스타일 */
+      background: #f0f0f0;              // 연한 회색 배경색 (16진수 색상 코드)
+      padding: 20px;                    // 카드 내부 여백 20픽셀 (내용물과 테두리 사이)
+      margin: 15px 0;                   // 카드 외부 여백 (위아래 15px, 좌우 0)
+      border-radius: 10px;              // 카드 모서리를 10픽셀 반경으로 둥글게 처리
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);  // 그림자 효과: 수평0px, 수직2px, 흐림5px, 투명도10%
+      width: 100%;                      // 카드 너비를 컨테이너에 맞춤
     }
     
-    /* 버튼 스타일 (LED 제어 버튼용) */
-    .button {
-      background-color: #4CAF50;  /* 초록색 배경 */
-      border: none;               /* 테두리 없음 */
-      color: white;               /* 흰색 글자 */
-      padding: 15px 32px;         /* 내부 여백 (위아래 15px, 좌우 32px) */
-      text-decoration: none;      /* 링크 밑줄 제거 */
-      display: inline-block;      /* 인라인 블록 요소로 표시 */
-      font-size: 16px;            /* 글자 크기 */
-      margin: 4px 2px;            /* 외부 여백 */
-      border-radius: 5px;         /* 모서리 둥글게 */
+    .button {  /* LED 제어 버튼의 스타일 */
+      background-color: #4CAF50;        // Material Design 초록색 배경
+      border: none;                     // 버튼 기본 테두리 제거
+      color: white;                     // 버튼 텍스트 색상을 흰색으로 설정
+      padding: 15px 32px;               // 버튼 내부 여백 (세로 15px, 가로 32px)
+      text-decoration: none;            // 링크 요소의 밑줄 제거
+      display: inline-block;            // 요소를 인라인 블록으로 표시 (가로 나열 가능, 크기 조절 가능)
+      font-size: 16px;                  // 버튼 텍스트 크기 16픽셀
+      margin: 4px 2px;                  // 버튼 외부 여백 (세로 4px, 가로 2px)
+      border-radius: 5px;               // 버튼 모서리를 5픽셀 반경으로 둥글게 처리
+      cursor: pointer;                  // 마우스 오버 시 손가락 모양 커서 표시 (클릭 가능함을 시각적으로 표현)
     }
     
-    h1 { color: #333; }                      /* 제목 색상: 진한 회색 */
-    .data { font-size: 24px; color: #0066cc; } /* 센서 데이터 글자: 크고 파란색 */
+    h1 { 
+      color: #333; 
+      margin-bottom: 10px;
+      font-size: 28px;
+    }  /* 메인 제목: 진한 회색, 하단 여백, 큰 글자 크기 */
+    
+    h3 { 
+      color: #666; 
+      margin-bottom: 30px;
+      font-weight: normal;
+    }  /* 부제목: 회색, 하단 여백, 일반 굵기 */
+    .data {   /* 센서 데이터 숫자를 표시하는 스타일 */
+      font-size: 24px;                  // 센서 데이터 텍스트 크기를 24픽셀로 크게 설정
+      color: #0066cc;                   // 센서 데이터 색상을 파란색으로 설정
+    }
+    
+    .status-bar {  /* 화면 상단 고정 상태바 스타일 */
+      position: fixed;                  // 스크롤해도 항상 같은 위치에 고정
+      top: 0; left: 0; right: 0;       // 화면 최상단(top:0)에 전체 너비(left:0, right:0)로 배치
+      background: #4CAF50;              // 상태바 배경을 초록색으로 설정
+      color: white;                     // 상태바 텍스트 색상을 흰색으로 설정
+      padding: 10px;                    // 상태바 내부 여백 10픽셀
+      font-size: 14px;                  // 상태바 텍스트 크기 14픽셀
+      z-index: 1000;                   // 다른 모든 요소보다 앞에 표시 (숫자가 클수록 앞쪽)
+    }
+    
+    .status-bar.offline {               // 네트워크 연결 오류 시 상태바 스타일
+      background: #f44336;              // 오류 상태일 때 배경을 빨간색으로 변경
+    }
+    
+    .update-indicator {  /* 실시간 업데이트를 나타내는 작은 원형 표시기 */
+      display: inline-block;            // 인라인 블록 요소로 표시
+      width: 10px; height: 10px;       // 10x10 픽셀 크기의 정사각형
+      background: #4CAF50;              // 초록색 배경
+      border-radius: 50%;               // 50% 반지름으로 완전한 원형 만들기
+      margin-left: 10px;                // 왼쪽에 10픽셀 여백
+      animation: pulse 1s infinite;     // 'pulse' 애니메이션을 1초 간격으로 무한 반복
+    }
+    
+    @keyframes pulse {  /* 펄스 애니메이션 정의 - 깜박이는 효과 */
+      0% { opacity: 1; }                // 애니메이션 시작: 완전 불투명
+      50% { opacity: 0.5; }             // 애니메이션 중간: 50% 투명도
+      100% { opacity: 1; }              // 애니메이션 끝: 다시 완전 불투명
+    }
   </style>
 </head>
 <body>
-  <h1>ESP32 IoT 대시보드</h1>  <!-- 페이지 제목 -->
+
+  <div class="container">  <!-- 메인 컨테이너 (모든 내용을 중앙 정렬) -->
+    <h1>ESP32 IoT Dashboard</h1>  <!-- 메인 제목 -->
+    <h3>Real-time Sensor Monitoring</h3>  <!-- 부제목 -->
+    
+    <div class="card" id="tempCard">  <!-- 온도 데이터 표시 카드 -->
+      <h2> Temperature</h2>  <!-- 온도계 이모지와 함께 온도 제목 -->
+      <div class="data" id="temperature">Loading...</div>  <!-- 온도 값이 표시될 영역 (초기값: Loading...) -->
+    </div>
+    
+    <div class="card" id="humCard">  <!-- 습도 데이터 표시 카드 -->
+      <h2> Humidity</h2>  <!-- 물방울 이모지와 함께 습도 제목 -->
+      <div class="data" id="humidity">Loading...</div>  <!-- 습도 값이 표시될 영역 (초기값: Loading...) -->
+    </div>
+    
+    <div class="card">  <!-- LED 제어 카드 -->
+      <h2> LED Control</h2>  <!-- 전구 이모지와 함께 LED 제어 제목 -->
+      <button onclick="controlLED('on')" class="button">LED ON</button>  <!-- LED 켜기 버튼 (클릭 시 controlLED('on') 함수 호출) -->
+      <button onclick="controlLED('off')" class="button" style="background-color:#f44336;">LED OFF</button>  <!-- LED 끄기 버튼 (빨간색 배경) -->
+    </div>
+  </div>  <!-- 컨테이너 끝 -->
   
-  <!-- 온도 표시 카드 -->
-  <div class="card">
-    <h2>온도</h2>
-    <!-- %TEMPERATURE%는 C++ 코드에서 실제 온도 값으로 교체됩니다 -->
-    <div class="data">%TEMPERATURE%°C</div>
-  </div>
-  
-  <!-- 습도 표시 카드 -->
-  <div class="card">
-    <h2>습도</h2>
-    <!-- %HUMIDITY%는 C++ 코드에서 실제 습도 값으로 교체됩니다 -->
-    <div class="data">%HUMIDITY%%</div>
-  </div>
-  
-  <!-- LED 제어 카드 -->
-  <div class="card">
-    <h2>LED 제어</h2>
-    <!-- LED 켜기 버튼: /led/on URL로 이동 -->
-    <a href="/led/on" class="button">LED 켜기</a>
-    <!-- LED 끄기 버튼: /led/off URL로 이동, 빨간색으로 표시 -->
-    <a href="/led/off" class="button" style="background-color:#f44336;">LED 끄기</a>
-  </div>
-  
-  <!-- 새로고침 링크: 메인 페이지(/)로 이동하여 최신 센서 데이터 확인 -->
-  <p><a href="/">새로고침</a></p>
+  <script>  <!-- JavaScript 코드 시작 -->
+    let updateInterval;                 // setInterval 함수의 반환값을 저장할 변수 (타이머 제어용)
+    let updateCount = 0;                // 데이터 업데이트 횟수를 카운트하는 변수 (디버깅용)
+    let connectionFailed = false;       // 연결 실패 상태를 추적하는 변수
+    let retryCount = 0;                 // 재시도 횟수를 카운트하는 변수
+    
+    // 센서 데이터를 서버에서 가져오는 비동기 함수 (AJAX)
+    async function fetchSensorData() {
+      try {  // 에러 처리를 위한 try-catch 블록 시작
+        const response = await fetch('/sensors', {  // ESP32의 '/sensors' API에 HTTP GET 요청 보내기
+          timeout: 5000  // 5초 타임아웃 설정
+        });
+        
+        if (!response.ok) {  // HTTP 응답이 성공이 아닌 경우
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();        // 서버 응답을 JSON 객체로 변환
+        
+        // 연결 성공 시 상태 초기화
+        connectionFailed = false;
+        retryCount = 0;
+        
+        // HTML 요소의 내용을 실시간 센서 데이터로 업데이트
+        document.getElementById('temperature').innerHTML = data.temperature + '°C';  // 온도 데이터에 단위 추가하여 화면 업데이트
+        document.getElementById('humidity').innerHTML = data.humidity + '%';         // 습도 데이터에 단위 추가하여 화면 업데이트
+        
+        // 현재 시간을 마지막 업데이트 시간으로 표시
+        document.getElementById('lastUpdate').innerHTML = new Date().toLocaleTimeString();  // 현재 시간을 현지 시간 형식으로 변환하여 표시
+        
+        updateCount++;  // 업데이트 횟수 카운터 증가
+        
+        // 상태바를 정상 상태로 설정 (오류 상태 클래스 제거)
+        const statusBar = document.getElementById('statusBar');
+        statusBar.className = 'status-bar';
+        statusBar.innerHTML = '<span> Real-time Monitoring</span><span class="update-indicator"></span><span style="float: right;">Last Update: <span id="lastUpdate">' + new Date().toLocaleTimeString() + '</span></span>';
+        
+        // 브라우저 개발자 도구 콘솔에 업데이트 정보 출력 (디버깅용)
+        console.log('Update #' + updateCount + ' - Temp: ' + data.temperature + '°C, Humidity: ' + data.humidity + '%');
+        
+      } catch (error) {  // 네트워크 오류나 서버 오류 발생 시 처리
+        connectionFailed = true;
+        retryCount++;
+        
+        console.error('Update failed (attempt ' + retryCount + '):', error);  // 콘솔에 에러 메시지 출력
+        
+        const statusBar = document.getElementById('statusBar');
+        statusBar.className = 'status-bar offline';  // 상태바를 오류 상태(빨간색)로 변경
+        statusBar.innerHTML = ` Connection Error (${retryCount}) - Retrying...`;  // 재시도 횟수와 함께 오류 메시지 표시
+        
+        // 센서 데이터를 "연결 오류"로 표시
+        if (retryCount > 3) {  // 3번 이상 실패 시
+          document.getElementById('temperature').innerHTML = 'Connection Error';
+          document.getElementById('humidity').innerHTML = 'Connection Error';
+        }
+      }
+    }
+    
+    // LED 제어를 위한 비동기 함수
+    async function controlLED(state) {  // state 매개변수: 'on' 또는 'off'
+      try {  // 에러 처리를 위한 try-catch 블록 시작
+        const response = await fetch('/led/' + state, {  // ESP32의 LED 제어 API 호출 ('/led/on' 또는 '/led/off')
+          timeout: 3000  // 3초 타임아웃 설정
+        });
+        
+        if (!response.ok) {  // HTTP 응답이 성공이 아닌 경우
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const result = await response.text();           // 서버 응답을 텍스트로 받기
+        console.log('LED ' + state.toUpperCase() + ' - ' + result);  // 콘솔에 LED 제어 결과 출력
+        
+        // 사용자에게 LED 제어 상태를 시각적으로 피드백 제공
+        const statusBar = document.getElementById('statusBar');  // 상태바 요소 가져오기
+        const originalContent = statusBar.innerHTML;            // 원래 상태바 내용 백업
+        
+        if (state === 'on') {  // LED 켜기 명령인 경우
+          statusBar.innerHTML = ' LED ON ';     // 상태바에 LED 켜짐 메시지 표시
+          statusBar.style.background = '#FF9800';              // 상태바 배경을 주황색으로 변경
+        } else {  // LED 끄기 명령인 경우
+          statusBar.innerHTML = ' LED OFF ';     // 상태바에 LED 꺼짐 메시지 표시
+          statusBar.style.background = '#9E9E9E';              // 상태바 배경을 회색으로 변경
+        }
+        
+        // 2초 후 상태바를 원래 상태로 복구
+        setTimeout(() => {  // 타이머 함수 설정
+          statusBar.innerHTML = originalContent;      // 원래 상태바 내용으로 복구
+          statusBar.style.background = '#4CAF50';     // 원래 초록색 배경으로 복구
+        }, 2000);  // 2000밀리초 (2초) 후 실행
+        
+      } catch (error) {  // LED 제어 실패 시 처리
+        console.error('LED control failed:', error);  // 콘솔에 에러 메시지 출력
+        
+        // 상태바에 LED 제어 실패 메시지 표시
+        const statusBar = document.getElementById('statusBar');
+        const originalContent = statusBar.innerHTML;
+        statusBar.innerHTML = ' LED 제어 실패 - ESP32 연결을 확인하세요';
+        statusBar.style.background = '#f44336';
+        
+        // 3초 후 원래 상태로 복구
+        setTimeout(() => {
+          statusBar.innerHTML = originalContent;
+          statusBar.style.background = '#4CAF50';
+        }, 3000);
+      }
+    }
+    
+    // 1초마다 자동으로 센서 데이터를 업데이트하는 함수
+    function startAutoUpdate() {
+      updateInterval = setInterval(() => {  // 1초 간격으로 반복 실행할 타이머 설정
+        fetchSensorData();  // 센서 데이터 가져오기 함수 호출
+      }, 1000);  // 1000밀리초 (1초) 간격
+    }
+    
+    // 연결 상태 체크 및 복구 함수
+    function checkConnection() {
+      if (connectionFailed && retryCount > 5) {  // 5번 이상 실패 시
+        console.log('연결 복구 시도 중...');
+        retryCount = 0;  // 재시도 카운터 리셋
+        
+        // 상태바 메시지 업데이트
+        const statusBar = document.getElementById('statusBar');
+        statusBar.innerHTML = ' 연결 복구 시도 중...';
+        statusBar.style.background = '#FF9800';  // 주황색으로 변경
+      }
+    }
+    
+    // 페이지가 완전히 로드된 후 실행되는 초기화 함수
+    window.onload = function() {
+      console.log('ESP32 IoT Dashboard 시작');  // 시작 메시지
+      fetchSensorData();  // 페이지 로드 즉시 센서 데이터 한 번 가져오기
+      startAutoUpdate();  // 자동 업데이트 타이머 시작
+      
+      // 10초마다 연결 상태 체크
+      setInterval(checkConnection, 10000);
+    };
+  </script>
 </body>
 </html>)rawliteral";
 
 /* ========== 초기 설정 함수 (Setup Function) ========== */
-// 이 함수는 ESP32가 부팅될 때 한 번만 실행됩니다
+// setup() 함수는 ESP32가 부팅될 때 단 한 번만 실행되는 초기화 함수
 void setup() {
-  // 시리얼 통신 시작 (컴퓨터와 디버깅 메시지 주고받기 위해)
-  Serial.begin(115200);  // 통신 속도: 115200 bps
+  Serial.begin(115200);                 // 시리얼 통신 초기화 (컴퓨터와 115200 bps 속도로 통신)
   
-  /* ----- LED 핀 초기화 ----- */
-  pinMode(ledPin, OUTPUT);     // 45번 핀을 출력 모드로 설정
-  digitalWrite(ledPin, LOW);   // LED 초기 상태를 꺼진 상태(LOW)로 설정
+  pinMode(ledPin, OUTPUT);              // GPIO 41번 핀을 디지털 출력 모드로 설정
+  digitalWrite(ledPin, LOW);            // LED 초기 상태를 OFF로 설정 (0V 출력)
+  ledState = false;                     // LED 상태 저장 변수도 false(꺼짐)로 초기화
   
-  /* ----- BME280 센서 초기화 ----- */
-  // I2C 주소 0x76으로 BME280 센서와 통신 시도
-  if (!bme.begin(0x76)) {
-    Serial.println("BME280 센서를 찾을 수 없습니다!"); // 센서 연결 실패 메시지
-    while (1);  // 무한 루프로 프로그램 중단 (센서 없이는 실행 불가)
+  // BME280 센서 초기화 및 연결 확인
+  if (!bme.begin(0x76)) {               // I2C 주소 0x76으로 BME280 센서 초기화 시도
+    Serial.println("BME280 sensor not found!");  // 센서 연결 실패 시 에러 메시지 출력
+    while (1);                          // 무한 루프로 프로그램 중단 (센서 없이는 실행 불가)
   }
   
-  /* ----- WiFi 네트워크 연결 ----- */
-  WiFi.begin(ssid, password);        // 설정된 WiFi 네트워크에 연결 시도
-  Serial.print("WiFi 연결 중");       // 연결 진행 상태 표시
+  // WiFi 네트워크 연결 시작
+  WiFi.begin(ssid, password);           // 설정된 SSID와 비밀번호로 WiFi 연결 시도
+  Serial.print("Connecting to WiFi");   // 연결 진행 상태 메시지 출력
   
-  // WiFi가 연결될 때까지 대기하는 반복문
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);        // 0.5초 대기
-    Serial.print("."); // 연결 중임을 나타내는 점(.) 출력
+  // WiFi 연결이 완료될 때까지 대기
+  while (WiFi.status() != WL_CONNECTED) {  // WiFi 연결 상태가 WL_CONNECTED가 아닌 동안 반복
+    delay(500);                         // 0.5초 대기
+    Serial.print(".");                  // 연결 진행 상황을 점(.)으로 시각적 표시
   }
   
-  // WiFi 연결 성공 시 실행되는 코드
-  Serial.println();                          // 줄바꿈
-  Serial.print("WiFi 연결됨! IP 주소: ");     // 성공 메시지
-  Serial.println(WiFi.localIP());            // ESP32가 할당받은 IP 주소 출력
+  // WiFi 연결 완료 후 정보 출력
+  Serial.println();                     // 줄바꿈
+  Serial.print("WiFi connected! IP address: ");  // 연결 성공 메시지
+  Serial.println(WiFi.localIP());       // DHCP에서 할당받은 IP 주소 출력 (이 주소로 웹브라우저 접속)
   
-  /* ----- 웹서버 라우팅 설정 (URL별 처리 함수 정의) ----- */
+  /* ========== 웹서버 라우팅 설정 ========== */
   
-  // 메인 페이지 처리 (사용자가 http://IP주소/ 로 접속할 때)
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String html = index_html;  // HTML 템플릿을 문자열 변수로 복사
+  // 메인 페이지 요청 처리 (http://IP주소/ 접속 시)
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {  // 루트 경로에 대한 GET 요청 처리
+    request->send(200, "text/html; charset=utf-8", index_html);  // HTTP 200 OK 응답과 함께 HTML 페이지 전송
+  });
+  
+  // 센서 데이터 API 엔드포인트 (AJAX 요청 처리용)
+  server.on("/sensors", HTTP_GET, [](AsyncWebServerRequest *request) {  // '/sensors' 경로에 대한 GET 요청 처리
+    String json = "{";                  // JSON 문자열 시작
+    json += "\"temperature\":" + String(bme.readTemperature(), 1) + ",";  // 온도 데이터 (소수점 1자리)
+    json += "\"humidity\":" + String(bme.readHumidity(), 1);              // 습도 데이터 (소수점 1자리)
+    json += "}";                        // JSON 문자열 끝
     
-    /* ----- 실시간 센서 데이터로 플레이스홀더 교체 ----- */
-    // %TEMPERATURE%를 실제 온도 값으로 변경 (소수점 1자리까지)
-    html.replace("%TEMPERATURE%", String(bme.readTemperature(), 1));
-    // %HUMIDITY%를 실제 습도 값으로 변경 (소수점 1자리까지)
-    html.replace("%HUMIDITY%", String(bme.readHumidity(), 1));
-    
-    // 완성된 HTML을 클라이언트(브라우저)에게 전송
-    request->send(200, "text/html", html);  // HTTP 200 OK 응답코드와 함께 전송
+    request->send(200, "application/json", json);  // JSON 형식으로 센서 데이터 응답
   });
   
-  // LED 켜기 처리 (사용자가 http://IP주소/led/on 으로 접속할 때)
-  server.on("/led/on", HTTP_GET, [](AsyncWebServerRequest *request) {
-    digitalWrite(ledPin, HIGH);    // LED 핀에 HIGH(3.3V) 신호 출력 → LED 켜짐
-    Serial.println("LED 켜짐");     // 시리얼 모니터에 상태 출력
-    request->redirect("/");        // 메인 페이지로 자동 이동 (새로고침 효과)
+  // LED 켜기 API 엔드포인트
+  server.on("/led/on", HTTP_GET, [](AsyncWebServerRequest *request) {  // '/led/on' 경로에 대한 GET 요청 처리
+    digitalWrite(ledPin, HIGH);          // GPIO 41번 핀에 HIGH(3.3V) 신호 출력하여 LED 켜기
+    ledState = true;                     // LED 상태 변수를 true(켜짐)로 업데이트
+    Serial.println("LED ON ");  // 시리얼 모니터에 LED 켜짐 상태 출력
+    request->send(200, "text/plain", "LED ON");     // 클라이언트에 성공 응답 전송
   });
   
-  // LED 끄기 처리 (사용자가 http://IP주소/led/off 로 접속할 때)
-  server.on("/led/off", HTTP_GET, [](AsyncWebServerRequest *request) {
-    digitalWrite(ledPin, LOW);     // LED 핀에 LOW(0V) 신호 출력 → LED 꺼짐
-    Serial.println("LED 꺼짐");     // 시리얼 모니터에 상태 출력
-    request->redirect("/");       // 메인 페이지로 자동 이동 (새로고침 효과)
+  // LED 끄기 API 엔드포인트
+  server.on("/led/off", HTTP_GET, [](AsyncWebServerRequest *request) {  // '/led/off' 경로에 대한 GET 요청 처리
+    digitalWrite(ledPin, LOW);           // GPIO 41번 핀에 LOW(0V) 신호 출력하여 LED 끄기
+    ledState = false;                    // LED 상태 변수를 false(꺼짐)로 업데이트
+    Serial.println("LED OFF"); // 시리얼 모니터에 LED 꺼짐 상태 출력
+    request->send(200, "text/plain", "LED OFF");    // 클라이언트에 성공 응답 전송
   });
   
-  /* ----- 웹서버 시작 ----- */
-  server.begin();                    // 설정된 라우팅으로 웹서버 실행 시작
-  Serial.println("웹서버 시작됨!");   // 서버 시작 완료 메시지
+  // 웹서버 시작
+  server.begin();                       // 설정된 모든 라우팅으로 웹서버 가동 시작
+  Serial.println("Web server started!");  // 웹서버 시작 완료 메시지
+  Serial.println("Real-time dashboard with 1-second updates ready!");  // 시스템 준비 완료 안내
 }
 
 /* ========== 메인 루프 함수 (Main Loop Function) ========== */
-// 이 함수는 setup() 실행 후 무한 반복됩니다 (프로그램이 계속 실행되는 동안)
+// loop() 함수는 setup() 완료 후 프로그램이 종료될 때까지 무한 반복 실행
 void loop() {
-  /* ----- 디버깅용 센서 데이터 출력 ----- */
-  Serial.print("온도: ");                    // 온도 라벨 출력
-  Serial.print(bme.readTemperature());       // BME280에서 현재 온도 읽어와서 출력
-  Serial.print("°C, 습도: ");                // 온도 단위와 습도 라벨
-  Serial.print(bme.readHumidity());          // BME280에서 현재 습도 읽어와서 출력
-  Serial.println("%");                       // 습도 단위와 줄바꿈
+  // LED 상태를 지속적으로 유지 (다른 요인으로 인한 상태 변경 방지)
+  digitalWrite(ledPin, ledState ? HIGH : LOW);  // 삼항연산자: ledState가 true면 HIGH, false면 LOW 출력
   
-  /* ----- 대기 시간 ----- */
-  delay(5000);  // 5초(5000밀리초) 대기 후 다시 센서 데이터 출력
-                // 이렇게 하면 시리얼 모니터에서 5초마다 센서 값을 확인 가능
-                // 웹페이지는 새로고침할 때마다 실시간 데이터가 업데이트됨
+  // 시리얼 모니터 출력 제어 (5초마다 한 번씩만 출력)
+  static unsigned long lastSerialOutput = 0;    // 마지막 시리얼 출력 시간을 저장하는 정적 변수
+  if (millis() - lastSerialOutput > 5000) {     // 현재 시간에서 마지막 출력 시간을 뺀 값이 5000ms(5초)보다 크면
+    Serial.print("Temperature: ");             // 온도 라벨 출력
+    Serial.print(bme.readTemperature());       // BME280에서 실시간 온도 값 읽어서 출력
+    Serial.print("°C, Humidity: ");            // 온도 단위와 습도 라벨 출력
+    Serial.print(bme.readHumidity());          // BME280에서 실시간 습도 값 읽어서 출력
+    Serial.print("%, LED: ");                  // 습도 단위와 LED 라벨 출력
+    Serial.println(ledState ? "ON" : "OFF");   // 삼항연산자: LED 상태를 문자열로 출력 후 줄바꿈
+    lastSerialOutput = millis();               // 현재 시간을 마지막 출력 시간으로 업데이트
+  }
+  
+  delay(100);  // 0.1초 지연으로 CPU 부하 감소 및 시스템 안정성 확보
 }
